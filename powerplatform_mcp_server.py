@@ -4,8 +4,12 @@ import json
 import asyncio
 import sys
 from typing import Dict, List, Any, Optional, Union
-from pydantic import BaseModel, Field
-from enum import Enum
+from datetime import datetime
+
+import mcp.server.stdio
+import mcp.types as types
+from mcp.server.lowlevel import NotificationOptions, Server
+from mcp.server.models import InitializationOptions
 
 from powerplatform_service import PowerPlatformService, PowerPlatformConfig
 
@@ -43,6 +47,17 @@ async def get_powerplatform_service():
         print("PowerPlatform service initialized", file=sys.stderr)
     
     return powerplatform_service
+
+# Create server instance
+server = Server("powerplatform-mcp")
+
+# Define prompt types
+PROMPT_TYPES = [
+    "ENTITY_OVERVIEW",
+    "ATTRIBUTE_DETAILS",
+    "QUERY_TEMPLATE",
+    "RELATIONSHIP_MAP"
+]
 
 # Pre-defined PowerPlatform Prompts
 class PowerPlatformPrompts:
@@ -92,281 +107,272 @@ class PowerPlatformPrompts:
             f"### Many-to-Many Relationships\n{{many_to_many}}\n\n"
         )
 
-# MCP Message models
-class Content(BaseModel):
-    type: str
-    text: str
-
-class Message(BaseModel):
-    role: str
-    content: Content
-
-class PromptResponse(BaseModel):
-    messages: List[Message]
-
-class ToolResponse(BaseModel):
-    content: List[Content]
-
-# Prompt type enum
-class PromptType(str, Enum):
-    ENTITY_OVERVIEW = "ENTITY_OVERVIEW"
-    ATTRIBUTE_DETAILS = "ATTRIBUTE_DETAILS"
-    QUERY_TEMPLATE = "QUERY_TEMPLATE"
-    RELATIONSHIP_MAP = "RELATIONSHIP_MAP"
-
-# Request models
-class EntityRequest(BaseModel):
-    entityName: str
-
-class AttributeRequest(BaseModel):
-    entityName: str
-    attributeName: str
-
-class OptionSetRequest(BaseModel):
-    optionSetName: str
-
-class RecordRequest(BaseModel):
-    entityNamePlural: str
-    recordId: str
-
-class QueryRequest(BaseModel):
-    entityNamePlural: str
-    filter: str
-    maxRecords: Optional[int] = 50
-
-class PromptRequest(BaseModel):
-    promptType: PromptType
-    entityName: str
-    attributeName: Optional[str] = None
-
-# MCP Server class
-class McpServer:
-    def __init__(self):
-        self.handlers = {}
-    
-    def register_handler(self, function_name, handler):
-        self.handlers[function_name] = handler
-    
-    async def handle_request(self, request_data):
-        try:
-            request = json.loads(request_data)
-            function_name = request.get("function")
-            params = request.get("params", {})
-            
-            if function_name not in self.handlers:
-                return {"error": f"Unknown function: {function_name}"}
-            
-            result = await self.handlers[function_name](params)
-            return {"id": request.get("id"), "result": result}
-        except Exception as e:
-            return {"error": str(e)}
-    
-    async def start(self):
-        while True:
-            try:
-                request_data = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
-                if not request_data:
-                    break
-                
-                response = await self.handle_request(request_data)
-                print(json.dumps(response), flush=True)
-            except Exception as e:
-                print(json.dumps({"error": f"Server error: {str(e)}"}), flush=True)
-
-# Handler implementations
-async def handle_get_entity_metadata(params):
-    try:
-        request = EntityRequest(**params)
-        service = await get_powerplatform_service()
-        metadata = await service.get_entity_metadata(request.entityName)
-        
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Entity metadata for '{request.entityName}':\n\n{json.dumps(metadata, indent=2)}"
-                }
+# List available tools
+@server.list_tools()
+async def handle_list_tools() -> List[types.Tool]:
+    return [
+        types.Tool(
+            name="get-entity-metadata",
+            description="Get metadata about a Power Platform entity",
+            arguments=[
+                types.ToolArgument(
+                    name="entityName",
+                    description="The logical name of the entity",
+                    required=True
+                )
             ]
-        }
+        ),
+        types.Tool(
+            name="get-entity-attributes",
+            description="Get attributes/fields of a Power Platform entity",
+            arguments=[
+                types.ToolArgument(
+                    name="entityName",
+                    description="The logical name of the entity",
+                    required=True
+                )
+            ]
+        ),
+        types.Tool(
+            name="get-entity-attribute",
+            description="Get a specific attribute/field of a Power Platform entity",
+            arguments=[
+                types.ToolArgument(
+                    name="entityName",
+                    description="The logical name of the entity",
+                    required=True
+                ),
+                types.ToolArgument(
+                    name="attributeName",
+                    description="The logical name of the attribute",
+                    required=True
+                )
+            ]
+        ),
+        types.Tool(
+            name="get-entity-relationships",
+            description="Get relationships for a Power Platform entity",
+            arguments=[
+                types.ToolArgument(
+                    name="entityName",
+                    description="The logical name of the entity",
+                    required=True
+                )
+            ]
+        ),
+        types.Tool(
+            name="get-global-option-set",
+            description="Get a global option set definition",
+            arguments=[
+                types.ToolArgument(
+                    name="optionSetName",
+                    description="The name of the global option set",
+                    required=True
+                )
+            ]
+        ),
+        types.Tool(
+            name="get-record",
+            description="Get a specific record by ID",
+            arguments=[
+                types.ToolArgument(
+                    name="entityNamePlural",
+                    description="The plural name of the entity (e.g., 'accounts', 'contacts')",
+                    required=True
+                ),
+                types.ToolArgument(
+                    name="recordId",
+                    description="The ID of the record to retrieve",
+                    required=True
+                )
+            ]
+        ),
+        types.Tool(
+            name="query-records",
+            description="Query records using an OData filter expression",
+            arguments=[
+                types.ToolArgument(
+                    name="entityNamePlural",
+                    description="The plural name of the entity (e.g., 'accounts', 'contacts')",
+                    required=True
+                ),
+                types.ToolArgument(
+                    name="filter",
+                    description="OData filter expression (e.g., \"name eq 'test'\")",
+                    required=True
+                ),
+                types.ToolArgument(
+                    name="maxRecords",
+                    description="Maximum number of records to retrieve (default: 50)",
+                    required=False
+                )
+            ]
+        ),
+        types.Tool(
+            name="use-powerplatform-prompt",
+            description="Use a predefined prompt template",
+            arguments=[
+                types.ToolArgument(
+                    name="promptType",
+                    description=f"Type of prompt to use. One of: {', '.join(PROMPT_TYPES)}",
+                    required=True
+                ),
+                types.ToolArgument(
+                    name="entityName",
+                    description="The logical name of the entity",
+                    required=True
+                ),
+                types.ToolArgument(
+                    name="attributeName",
+                    description="The logical name of the attribute (required for ATTRIBUTE_DETAILS prompt)",
+                    required=False
+                )
+            ]
+        )
+    ]
+
+# List available prompts
+@server.list_prompts()
+async def handle_list_prompts() -> List[types.Prompt]:
+    return [
+        types.Prompt(
+            name="entity-overview",
+            description="Get an overview of a Power Platform entity",
+            arguments=[
+                types.PromptArgument(
+                    name="entityName",
+                    description="The logical name of the entity",
+                    required=True
+                )
+            ]
+        ),
+        types.Prompt(
+            name="attribute-details",
+            description="Get detailed information about a specific entity attribute",
+            arguments=[
+                types.PromptArgument(
+                    name="entityName",
+                    description="The logical name of the entity",
+                    required=True
+                ),
+                types.PromptArgument(
+                    name="attributeName",
+                    description="The logical name of the attribute",
+                    required=True
+                )
+            ]
+        ),
+        types.Prompt(
+            name="query-template",
+            description="Get a template for querying a Power Platform entity",
+            arguments=[
+                types.PromptArgument(
+                    name="entityName",
+                    description="The logical name of the entity",
+                    required=True
+                )
+            ]
+        ),
+        types.Prompt(
+            name="relationship-map",
+            description="Get a list of relationships for a Power Platform entity",
+            arguments=[
+                types.PromptArgument(
+                    name="entityName",
+                    description="The logical name of the entity",
+                    required=True
+                )
+            ]
+        )
+    ]
+
+# Handle get-entity-metadata tool
+@server.call_tool()
+async def handle_get_entity_metadata(name: str, arguments: Dict[str, Any]) -> types.ToolCallResult:
+    if name != "get-entity-metadata":
+        raise ValueError(f"Unknown tool: {name}")
+    
+    try:
+        entity_name = arguments.get("entityName")
+        if not entity_name:
+            raise ValueError("entityName is required")
+        
+        service = await get_powerplatform_service()
+        metadata = await service.get_entity_metadata(entity_name)
+        
+        return types.ToolCallResult(
+            content=[
+                types.TextContent(
+                    type="text",
+                    text=f"Metadata for entity '{entity_name}':\n\n{json.dumps(metadata, indent=2)}"
+                )
+            ]
+        )
     except Exception as e:
         print(f"Error getting entity metadata: {e}", file=sys.stderr)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Failed to get entity metadata: {str(e)}"
-                }
+        return types.ToolCallResult(
+            content=[
+                types.TextContent(
+                    type="text",
+                    text=f"Failed to get entity metadata: {str(e)}"
+                )
             ]
-        }
+        )
 
-async def handle_get_entity_attributes(params):
+# Handle get-entity-attributes tool
+@server.call_tool()
+async def handle_get_entity_attributes(name: str, arguments: Dict[str, Any]) -> types.ToolCallResult:
+    if name != "get-entity-attributes":
+        raise ValueError(f"Unknown tool: {name}")
+    
     try:
-        request = EntityRequest(**params)
-        service = await get_powerplatform_service()
-        attributes = await service.get_entity_attributes(request.entityName)
+        entity_name = arguments.get("entityName")
+        if not entity_name:
+            raise ValueError("entityName is required")
         
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Attributes for entity '{request.entityName}':\n\n{json.dumps(attributes, indent=2)}"
-                }
+        service = await get_powerplatform_service()
+        attributes = await service.get_entity_attributes(entity_name)
+        
+        return types.ToolCallResult(
+            content=[
+                types.TextContent(
+                    type="text",
+                    text=f"Attributes for entity '{entity_name}':\n\n{json.dumps(attributes, indent=2)}"
+                )
             ]
-        }
+        )
     except Exception as e:
         print(f"Error getting entity attributes: {e}", file=sys.stderr)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Failed to get entity attributes: {str(e)}"
-                }
+        return types.ToolCallResult(
+            content=[
+                types.TextContent(
+                    type="text",
+                    text=f"Failed to get entity attributes: {str(e)}"
+                )
             ]
-        }
+        )
 
-async def handle_get_entity_attribute(params):
+# Handle entity-overview prompt
+@server.get_prompt()
+async def handle_get_prompt(name: str, arguments: Dict[str, str] | None) -> types.GetPromptResult:
+    if not arguments:
+        raise ValueError("Arguments are required")
+    
     try:
-        request = AttributeRequest(**params)
-        service = await get_powerplatform_service()
-        attribute = await service.get_entity_attribute(request.entityName, request.attributeName)
-        
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Attribute '{request.attributeName}' for entity '{request.entityName}':\n\n{json.dumps(attribute, indent=2)}"
-                }
-            ]
-        }
-    except Exception as e:
-        print(f"Error getting entity attribute: {e}", file=sys.stderr)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Failed to get entity attribute: {str(e)}"
-                }
-            ]
-        }
-
-async def handle_get_entity_relationships(params):
-    try:
-        request = EntityRequest(**params)
-        service = await get_powerplatform_service()
-        relationships = await service.get_entity_relationships(request.entityName)
-        
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Relationships for entity '{request.entityName}':\n\n{json.dumps(relationships, indent=2)}"
-                }
-            ]
-        }
-    except Exception as e:
-        print(f"Error getting entity relationships: {e}", file=sys.stderr)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Failed to get entity relationships: {str(e)}"
-                }
-            ]
-        }
-
-async def handle_get_global_option_set(params):
-    try:
-        request = OptionSetRequest(**params)
-        service = await get_powerplatform_service()
-        option_set = await service.get_global_option_set(request.optionSetName)
-        
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Global option set '{request.optionSetName}':\n\n{json.dumps(option_set, indent=2)}"
-                }
-            ]
-        }
-    except Exception as e:
-        print(f"Error getting global option set: {e}", file=sys.stderr)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Failed to get global option set: {str(e)}"
-                }
-            ]
-        }
-
-async def handle_get_record(params):
-    try:
-        request = RecordRequest(**params)
-        service = await get_powerplatform_service()
-        record = await service.get_record(request.entityNamePlural, request.recordId)
-        
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Record from '{request.entityNamePlural}' with ID '{request.recordId}':\n\n{json.dumps(record, indent=2)}"
-                }
-            ]
-        }
-    except Exception as e:
-        print(f"Error getting record: {e}", file=sys.stderr)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Failed to get record: {str(e)}"
-                }
-            ]
-        }
-
-async def handle_query_records(params):
-    try:
-        request = QueryRequest(**params)
-        service = await get_powerplatform_service()
-        records = await service.query_records(request.entityNamePlural, request.filter, request.maxRecords)
-        
-        record_count = len(records.get("value", []))
-        
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Retrieved {record_count} records from '{request.entityNamePlural}' with filter '{request.filter}':\n\n{json.dumps(records, indent=2)}"
-                }
-            ]
-        }
-    except Exception as e:
-        print(f"Error querying records: {e}", file=sys.stderr)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Failed to query records: {str(e)}"
-                }
-            ]
-        }
-
-async def handle_use_powerplatform_prompt(params):
-    try:
-        request = PromptRequest(**params)
-        service = await get_powerplatform_service()
-        
-        prompt_content = ""
-        replacements = {}
-        
-        if request.promptType == PromptType.ENTITY_OVERVIEW:
+        if name == "entity-overview":
+            entity_name = arguments.get("entityName")
+            if not entity_name:
+                raise ValueError("entityName is required")
+            
+            service = await get_powerplatform_service()
+            
             # Get entity metadata and key attributes
-            metadata = await service.get_entity_metadata(request.entityName)
-            attributes = await service.get_entity_attributes(request.entityName)
+            metadata = await service.get_entity_metadata(entity_name)
+            attributes = await service.get_entity_attributes(entity_name)
             
             # Format entity details
             entity_details = (
-                f"- Display Name: {metadata.get('DisplayName', {}).get('UserLocalizedLabel', {}).get('Label', request.entityName)}\n"
+                f"- Display Name: {metadata.get('DisplayName', {}).get('UserLocalizedLabel', {}).get('Label', entity_name)}\n"
                 f"- Schema Name: {metadata.get('SchemaName')}\n"
                 f"- Description: {metadata.get('Description', {}).get('UserLocalizedLabel', {}).get('Label', 'No description')}\n"
                 f"- Primary Key: {metadata.get('PrimaryIdAttribute')}\n"
@@ -380,7 +386,7 @@ async def handle_use_powerplatform_prompt(params):
             ])
             
             # Get relationships summary
-            relationships = await service.get_entity_relationships(request.entityName)
+            relationships = await service.get_entity_relationships(entity_name)
             one_to_many_count = len(relationships.get("oneToMany", {}).get("value", []))
             many_to_many_count = len(relationships.get("manyToMany", {}).get("value", []))
             
@@ -389,127 +395,55 @@ async def handle_use_powerplatform_prompt(params):
                 f"- Many-to-Many Relationships: {many_to_many_count}"
             )
             
-            prompt_content = PowerPlatformPrompts.entity_overview(request.entityName)
+            prompt_content = PowerPlatformPrompts.entity_overview(entity_name)
             replacements = {
                 "{{entity_details}}": entity_details,
                 "{{key_attributes}}": key_attributes,
                 "{{relationships}}": relationships_summary
             }
             
-        elif request.promptType == PromptType.ATTRIBUTE_DETAILS:
-            if not request.attributeName:
-                raise Exception("attributeName is required for ATTRIBUTE_DETAILS prompt")
+            # Replace all placeholders in the template
+            for placeholder, value in replacements.items():
+                prompt_content = prompt_content.replace(placeholder, value)
             
-            # Get attribute details
-            attribute = await service.get_entity_attribute(request.entityName, request.attributeName)
-            
-            # Format attribute details
-            attr_details = (
-                f"- Display Name: {attribute.get('DisplayName', {}).get('UserLocalizedLabel', {}).get('Label', request.attributeName)}\n"
-                f"- Description: {attribute.get('Description', {}).get('UserLocalizedLabel', {}).get('Label', 'No description')}\n"
-                f"- Type: {attribute.get('AttributeType')}\n"
-                f"- Format: {attribute.get('Format', 'N/A')}\n"
-                f"- Is Required: {attribute.get('RequiredLevel', {}).get('Value', 'No')}\n"
-                f"- Is Searchable: {attribute.get('IsValidForAdvancedFind', False)}"
+            return types.GetPromptResult(
+                description=f"Overview of the {entity_name} entity",
+                messages=[
+                    types.PromptMessage(
+                        role="user",
+                        content=types.TextContent(
+                            type="text",
+                            text=prompt_content
+                        )
+                    )
+                ]
             )
-            
-            prompt_content = PowerPlatformPrompts.attribute_details(request.entityName, request.attributeName)
-            replacements = {
-                "{{attribute_details}}": attr_details,
-                "{{data_type}}": attribute.get('AttributeType', 'Unknown'),
-                "{{required}}": attribute.get('RequiredLevel', {}).get('Value', 'No'),
-                "{{max_length}}": str(attribute.get('MaxLength', 'N/A'))
-            }
-            
-        elif request.promptType == PromptType.QUERY_TEMPLATE:
-            # Get entity metadata to determine plural name
-            metadata = await service.get_entity_metadata(request.entityName)
-            entity_name_plural = metadata.get('EntitySetName')
-            
-            # Get a few important fields for the select example
-            attributes = await service.get_entity_attributes(request.entityName)
-            select_fields = ",".join([
-                attr.get("LogicalName")
-                for attr in attributes.get("value", [])[:5]  # Just take first 5 for example
-            ])
-            
-            prompt_content = PowerPlatformPrompts.query_template(entity_name_plural)
-            replacements = {
-                "{{selected_fields}}": select_fields,
-                "{{filter_conditions}}": f"{metadata.get('PrimaryNameAttribute')} eq 'Example'",
-                "{{order_by}}": f"{metadata.get('PrimaryNameAttribute')} asc",
-                "{{max_records}}": "50"
-            }
-            
-        elif request.promptType == PromptType.RELATIONSHIP_MAP:
-            # Get relationships
-            relationships = await service.get_entity_relationships(request.entityName)
-            
-            # Format one-to-many relationships where this entity is primary
-            one_to_many_primary = "\n".join([
-                f"- {rel.get('SchemaName')}: {request.entityName} (1) → {rel.get('ReferencingEntity')} (N)"
-                for rel in relationships.get("oneToMany", {}).get("value", [])
-                if rel.get("ReferencingEntity") != request.entityName
-            ]) or "None found"
-            
-            # Format one-to-many relationships where this entity is related
-            one_to_many_related = "\n".join([
-                f"- {rel.get('SchemaName')}: {rel.get('ReferencedEntity')} (1) → {request.entityName} (N)"
-                for rel in relationships.get("oneToMany", {}).get("value", [])
-                if rel.get("ReferencingEntity") == request.entityName
-            ]) or "None found"
-            
-            # Format many-to-many relationships
-            many_to_many = "\n".join([
-                f"- {rel.get('SchemaName')}: {request.entityName} (N) ↔ {rel.get('Entity1LogicalName') if rel.get('Entity1LogicalName') != request.entityName else rel.get('Entity2LogicalName')} (N)"
-                for rel in relationships.get("manyToMany", {}).get("value", [])
-            ]) or "None found"
-            
-            prompt_content = PowerPlatformPrompts.relationship_map(request.entityName)
-            replacements = {
-                "{{one_to_many_primary}}": one_to_many_primary,
-                "{{one_to_many_related}}": one_to_many_related,
-                "{{many_to_many}}": many_to_many
-            }
         
-        # Replace all placeholders in the template
-        for placeholder, value in replacements.items():
-            prompt_content = prompt_content.replace(placeholder, value)
+        # Add other prompt handlers here...
         
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": prompt_content
-                }
-            ]
-        }
+        else:
+            raise ValueError(f"Unknown prompt: {name}")
+    
     except Exception as e:
-        print(f"Error using PowerPlatform prompt: {e}", file=sys.stderr)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Failed to use PowerPlatform prompt: {str(e)}"
-                }
-            ]
-        }
+        print(f"Error getting prompt: {e}", file=sys.stderr)
+        raise ValueError(f"Failed to get prompt: {str(e)}")
 
-async def main():
-    server = McpServer()
-    
-    # Register handlers
-    server.register_handler("get-entity-metadata", handle_get_entity_metadata)
-    server.register_handler("get-entity-attributes", handle_get_entity_attributes)
-    server.register_handler("get-entity-attribute", handle_get_entity_attribute)
-    server.register_handler("get-entity-relationships", handle_get_entity_relationships)
-    server.register_handler("get-global-option-set", handle_get_global_option_set)
-    server.register_handler("get-record", handle_get_record)
-    server.register_handler("query-records", handle_query_records)
-    server.register_handler("use-powerplatform-prompt", handle_use_powerplatform_prompt)
-    
+async def run():
     print("Initializing PowerPlatform MCP Server...", file=sys.stderr)
-    await server.start()
+    
+    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            InitializationOptions(
+                server_name="powerplatform-mcp",
+                server_version="1.0.0",
+                capabilities=server.get_capabilities(
+                    notification_options=NotificationOptions(),
+                    experimental_capabilities={},
+                ),
+            ),
+        )
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(run()) 
