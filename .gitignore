@@ -1,0 +1,8 @@
+powerplatform_mcp.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+**powerplatform-mcp
